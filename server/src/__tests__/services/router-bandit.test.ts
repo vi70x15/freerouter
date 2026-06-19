@@ -27,13 +27,13 @@ const ORIGINAL_NODE_ENV = process.env.NODE_ENV;
 // Insert a model + its fallback entry; returns the model id.
 function addModel(opts: {
   platform: string; modelId: string; name: string;
-  intelligenceRank: number; sizeLabel: string; budget: string; priority: number;
+  intelligenceRank: number; speedRank?: number; sizeLabel: string; budget: string; priority: number;
 }): number {
   const db = getDb();
   db.prepare(`
     INSERT INTO models (platform, model_id, display_name, intelligence_rank, speed_rank, size_label, monthly_token_budget, enabled)
     VALUES (?, ?, ?, ?, ?, ?, ?, 1)
-  `).run(opts.platform, opts.modelId, opts.name, opts.intelligenceRank, 1, opts.sizeLabel, opts.budget);
+  `).run(opts.platform, opts.modelId, opts.name, opts.intelligenceRank, opts.speedRank ?? 1, opts.sizeLabel, opts.budget);
   const id = (db.prepare('SELECT id FROM models WHERE platform = ? AND model_id = ?')
     .get(opts.platform, opts.modelId) as { id: number }).id;
   db.prepare('INSERT INTO fallback_config (model_db_id, priority, enabled) VALUES (?, ?, 1)').run(id, opts.priority);
@@ -129,11 +129,14 @@ describe('bandit router', () => {
   });
 
   it('smartest vs fastest flips which model wins, at equal reliability', () => {
-    // Smart: frontier tier, slow. Fast: small tier, high throughput. Equal success.
-    addModel({ platform: 'google', modelId: 'smart', name: 'Smart', intelligenceRank: 1, sizeLabel: 'Frontier', budget: '~50M', priority: 1 });
-    addModel({ platform: 'groq', modelId: 'fast', name: 'Fast', intelligenceRank: 9, sizeLabel: 'Small', budget: '~50M', priority: 2 });
-    addHistory('google', 'smart', { successes: 40, failures: 1, outTokens: 100, latencyMs: 3000, ttfbMs: 2500 });
-    addHistory('groq', 'fast', { successes: 40, failures: 1, outTokens: 1000, latencyMs: 1000, ttfbMs: 150 });
+    // Smart: frontier tier, slow (high speed_rank = slow default). Fast: small tier, fast (low speed_rank).
+    // Both get 60+2=62 requests, well above REAL_SPEED_CONFIDENCE_THRESHOLD (50),
+    // so real tok/s dominates. The speed_rank difference ensures the default
+    // speed_score also agrees, even when blended across the full catalog range.
+    addModel({ platform: 'google', modelId: 'smart', name: 'Smart', intelligenceRank: 1, speedRank: 50, sizeLabel: 'Frontier', budget: '~50M', priority: 1 });
+    addModel({ platform: 'groq', modelId: 'fast', name: 'Fast', intelligenceRank: 9, speedRank: 1, sizeLabel: 'Small', budget: '~50M', priority: 2 });
+    addHistory('google', 'smart', { successes: 60, failures: 2, outTokens: 100, latencyMs: 3000, ttfbMs: 2500 });
+    addHistory('groq', 'fast', { successes: 60, failures: 2, outTokens: 1000, latencyMs: 1000, ttfbMs: 150 });
 
     setRoutingStrategy('smartest');
     refreshStatsCache(getDb(), true);
@@ -142,6 +145,9 @@ describe('bandit router', () => {
 
     setRoutingStrategy('fastest');
     refreshStatsCache(getDb(), true);
+    const dbg = getRoutingScores();
+    for (const s of dbg.scores) console.log(`fastest ${s.modelId}: spd=${s.speed.toFixed(4)} int=${s.intelligence.toFixed(4)} rel=${s.reliability.toFixed(4)} score=${s.score.toFixed(4)} reqs=${s.totalRequests}`);
+    console.log('weights:', JSON.stringify(dbg.weights));
     const fastRun = pickCounts(300);
     expect((fastRun['fast'] ?? 0)).toBeGreaterThan(fastRun['smart'] ?? 0);
   });
@@ -164,10 +170,12 @@ describe('bandit router', () => {
   });
 
   it('custom strategy routes with the saved weights (extreme speed wins)', () => {
-    addModel({ platform: 'google', modelId: 'smart', name: 'Smart', intelligenceRank: 1, sizeLabel: 'Frontier', budget: '~50M', priority: 1 });
-    addModel({ platform: 'groq', modelId: 'fast', name: 'Fast', intelligenceRank: 9, sizeLabel: 'Small', budget: '~50M', priority: 2 });
-    addHistory('google', 'smart', { successes: 40, failures: 1, outTokens: 100, latencyMs: 3000, ttfbMs: 2500 });
-    addHistory('groq', 'fast', { successes: 40, failures: 1, outTokens: 1000, latencyMs: 1000, ttfbMs: 150 });
+    // Same confidence rationale: 62 requests per model crosses the threshold
+    // so real tok/s dominates the speed axis. speedRank differentiates defaults.
+    addModel({ platform: 'google', modelId: 'smart', name: 'Smart', intelligenceRank: 1, speedRank: 50, sizeLabel: 'Frontier', budget: '~50M', priority: 1 });
+    addModel({ platform: 'groq', modelId: 'fast', name: 'Fast', intelligenceRank: 9, speedRank: 1, sizeLabel: 'Small', budget: '~50M', priority: 2 });
+    addHistory('google', 'smart', { successes: 60, failures: 2, outTokens: 100, latencyMs: 3000, ttfbMs: 2500 });
+    addHistory('groq', 'fast', { successes: 60, failures: 2, outTokens: 1000, latencyMs: 1000, ttfbMs: 150 });
 
     setRoutingStrategy('custom');
     setCustomWeights({ reliability: 0.1, speed: 0.9, intelligence: 0 });
