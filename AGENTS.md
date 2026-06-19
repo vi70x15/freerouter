@@ -10,8 +10,7 @@ client/          React 19 + Vite dashboard — key management, analytics, playgr
 shared/          Shared TypeScript types (ChatMessage, Provider interfaces)
 scripts/         CLI entry point (cli.mjs)
 docker/          Docker setup docs
-docs/specs/      Design specs for features in progress
-requirements/    Design docs, task tracking
+docs/specs/      Design specs for features in progress (benchmark-unification, dynamic-degradation, freellmproxy-integration)
 ```
 
 Key server modules: `server/src/providers/` (per-provider adapters extending `BaseProvider`), `server/src/services/router.ts` (request routing + scoring), `server/src/routes/proxy.ts` (the /v1/chat/completions endpoint), `server/src/services/ratelimit.ts`.
@@ -38,9 +37,9 @@ Key server modules: `server/src/providers/` (per-provider adapters extending `Ba
 
 Read these only when relevant to your current task:
 
-- `RULES.md` — fork management, branching, sync, conflict resolution, testing, credential import
+- **`RULES.md §0`** — the full SOP for planning, delegation, and code review (analyze → delegate → verify loop)
+- `RULES.md §1–§13` — fork management, branching, sync, conflict resolution, testing, credential import
 - `docs/specs/` — design specs for in-progress features
-- `requirements/` — design docs and task tracking
 
 ## jcodemunch
 

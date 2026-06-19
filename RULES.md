@@ -1,14 +1,73 @@
-# Fork Management Rules — API-Gateway
+# Repository Rules — API-Gateway
 
 > **Audience:** AI agents + human maintainers. Follow these rules exactly. Order matters.
 > 
-> **Last updated:** 2026-06-08 after a major rebase of 2 feature branches through upstream's
-> migration refactor (V24→V25). Lessons from every conflict, every wrong turn, and every
-> recovery are baked into this document.
+> **Last updated:** 2026-06-20
 
 ---
 
-## 0. Repository Identity
+## 0. Agent SOP — Planning, Delegation & Review
+
+When your task involves writing or modifying source code, follow this loop.
+For read-only tasks (exploration, questions, debugging), skip to step 1 only.
+
+### Step 1: Analyze & Plan
+
+Understand the request, then explore the codebase with jcodemunch:
+
+1. `plan_turn(repo="api-llm-local", query="...")` — opening move. Returns confidence + recommended symbols.
+2. `search_symbols` — find exact symbols involved.
+3. `get_blast_radius(symbol="...", depth=2)` — understand downstream impact before planning.
+4. `get_hotspots` / `find_dead_code` — identify risk areas related to the task.
+5. `get_class_hierarchy(class_name="...")` — understand inheritance if relevant.
+6. `get_dependency_graph(file="...", direction="imports")` — map module boundaries.
+
+Break the work into the smallest logical, incremental steps. Do not rush.
+
+### Step 2: Delegate ONE Step
+
+Formulate a prompt for `spawn_agent`. Delegate only the immediate next step — never bundle multiple steps.
+
+Include in every delegation prompt:
+- **The repo identifier:** `api-llm-local`
+- **Target symbol_ids** the subagent needs to read or modify.
+- **The jcodemunch mandate:** instruct the subagent to use jcodemunch tools for all code
+  lookup — `get_file_outline` before reading any file, `search_symbols`/`get_symbol_source`
+  instead of reading whole files, `get_context_bundle`/`get_ranked_context` for task-driven context.
+- **A token budget** when using context assembly tools to keep prompts focused.
+- **Full context:** `spawn_agent` is stateless and knows nothing from previous turns.
+  Pass everything it needs — never assume it remembers prior steps.
+
+Example delegation preamble:
+```
+You are working in repo "api-llm-local" (indexed via jcodemunch-mcp).
+Mandatory: use jcodemunch tools for ALL code lookup.
+- get_file_outline before pulling source
+- search_symbols / get_symbol_source for targeted retrieval
+- Batch with symbol_ids[] instead of repeated calls
+- get_ranked_context(query="...", token_budget=4000) for task-driven context
+
+Target symbols: <list symbol_ids>
+```
+
+### Step 3: Review the Result
+
+After the subagent returns, verify with jcodemunch:
+
+1. `get_blast_radius(symbol="...", include_source=true)` — confirm impact matches expectations.
+2. `find_references(identifier="...")` — verify no call site is broken.
+3. `get_call_hierarchy(symbol_id="...", direction="callers")` — trace upstream dependents.
+4. `get_symbol_source(symbol_id="...", verify=true)` — confirm indexed source matches what was written.
+5. `register_edit(file_paths=["..."], reindex=true)` — keep the index fresh.
+6. Run `npm run test` to verify nothing is broken.
+
+If the step is satisfactory, move to the next step (return to step 2).
+If revision is needed, delegate again with the symbol_ids, current state, and corrective feedback.
+Never fix code yourself — always delegate.
+
+---
+
+## 1. Repository Identity
 
 | Role | URL |
 |---|---|
