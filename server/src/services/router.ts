@@ -321,17 +321,29 @@ export function refreshStatsCache(db: Database, force = false): void {
 // composes cleanly with the existing min-max normalization.
 const TIER_VALUE: Record<string, number> = { Frontier: 4, Large: 3, Medium: 2, Small: 1 };
 function intelligenceComposite(sizeLabel: string, intelligenceRank: number, benchmarkScore: number | null): number {
-  // Benchmark score is the preferred signal — it's empirically grounded
-  // and directly comparable across providers.
+  // NOTE: benchmark_score must ONLY be populated from intelligence sources
+  // (AA Intelligence Index, SWE-rebench). NIM speed/reliability scores are
+  // explicitly excluded from this column — they go into nim_throughput_tps etc.
+  //
+  // When benchmark_score is available, it's used directly — it's empirically
+  // grounded and directly comparable across providers.
   if (benchmarkScore != null && benchmarkScore > 0) {
     // Scale to same range as tier-based composite (~0–4000) so the
     // scores blend naturally with any unscored models in the chain.
     // A score of 60 maps to 4000 (frontier-class), 3 maps to 200 (tiny).
     return benchmarkScore * (4000 / 60);
   }
+  // No benchmark data → this model has UNKNOWN intelligence.
+  // Use NEGATIVE composites so that after min-max normalization ALL
+  // unscored models rank below ALL scored models. Within the no-data
+  // pool, higher tier + lower rank = closer to 0 = higher composite.
+  // Formula: -(maxTier*100 - tier*100 + intelligenceRank)
+  // = -(400 - tier*100 + rank)
+  // Examples: Frontier #1 = -1, Small #99 = -399, Small #50 = -350.
+  // This leaves room for a future "boost" feature that can elevate
+  // specific unscored models above their pool position.
   const tier = TIER_VALUE[sizeLabel] ?? 0;
-  // tier*1000 keeps tiers strictly separated; -rank prefers lower rank in-tier.
-  return tier * 1000 - intelligenceRank;
+  return -(4 * 100 - tier * 100 + intelligenceRank);
 }
 
 // Per-model axis values + the final score. `sampled` chooses Thompson sampling

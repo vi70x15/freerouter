@@ -56,10 +56,16 @@ Boot / POST /api/benchmarks/sync
   Release isSyncing mutex. Return per-source results.
 ```
 
-**Phase 1:** NIM speed/reliability columns stored but **not blended** into `scoreChainEntry()`.
-Logged for correlation analysis only (R9.4).
+**Phase 1:** NIM speed/reliability columns stored per-source but **excluded from the intelligence composite**.
+NIM data (nim_throughput_tps, nim_avg_response_ms, nim_uptime_pct) is stored for
+future use as speed/reliability seed data that feeds into `heavyWeightedSpeedScore()`.
+NIM weight set to 0.0 in `benchmark_source_weights` — it does NOT contribute to
+`benchmark_score`. [Bug fix v3: NIM was incorrectly blended at weight 0.15,
+corrupting intelligence scores with speed data.]
 
-**Phase 2 (future):** After correlation study, integrate with true Bayesian blending + sample-size decay.
+**Phase 2 (future):** Use NIM throughput/latency/uptime data as seed for
+`speedCompositeFromRank` when real measured data is absent — replacing the
+manual `speed_rank` default with empirical NIMStats observations.
 
 ---
 

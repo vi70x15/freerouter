@@ -22,6 +22,24 @@
 
 ---
 
+## Contents
+
+- [What FreeRouter adds](#what-freerouter-adds)
+- [In Development](#in-development)
+- [Quick Start](#quick-start)
+- [Docker](#docker)
+- [Cloud Proxy](#cloud-proxy)
+- [Using the API](#using-the-api)
+- [Context Handoff](#context-handoff)
+- [Supported Providers](#supported-providers)
+- [Custom Platforms and Models](#custom-platforms-and-models)
+- [Screenshots](#screenshots)
+- [Limitations](#limitations)
+- [Contributing](#contributing)
+- [Terms of Service Review](#terms-of-service-review)
+- [Disclaimer](#disclaimer)
+- [License](#license)
+
 ## What FreeRouter adds
 
 Everything below is **on top of** [MLuqmanBR/api-gateway](https://github.com/MLuqmanBR/api-gateway) — which already ships OpenAI-compatible routing, Thompson-sampling bandits, per-key rate tracking, recovery, custom provider CRUD, context handoff, encrypted storage, dark-mode dashboard, Docker support, and more. If it's not listed here, api-gateway already has it.
@@ -137,41 +155,39 @@ More Docker operations and examples live in [docker/README.md](./docker/README.m
 
 ## Cloud Proxy
 
-FreeRouter ships an **optional** Cloudflare Workers proxy layer for IP rotation and header stripping. Deploy it to route requests through geographically-distributed exit IPs so upstream providers see consistent, non-identifying IP addresses instead of your real one.
+API-Gateway ships a Cloudflare Workers proxy layer for IP rotation and header stripping. Deploy it to route requests through geographically-distributed exit IPs so upstream providers see consistent, non-identifying IP addresses instead of your real one.
 
-> **This feature is entirely opt-in.** If you don't clone the `freellmproxy` submodule or deploy workers, the gateway works exactly as before — no proxy, no errors.
-
-**Prerequisites:** [wrangler](https://developers.cloudflare.com/workers/wrangler/) installed and logged in. Either install globally (`npm i -g wrangler && wrangler login`) or use the devDependency bundled in the proxy submodule (`cd freellmproxy && npx wrangler login`).
+**Prerequisites:** [wrangler](https://developers.cloudflare.com/workers/wrangler/) installed and logged in (`npm i -g wrangler && wrangler login`).
 
 ```bash
-npm run proxy:deploy
+npm run proxy:up
 ```
 
-> **Upcoming:** `npm run proxy:up` will replace `proxy:deploy` with a zero-config deploy flow. See `docs/specs/freellmproxy-integration/`.
+That's it. The first run automatically:
 
-On first run this automatically:
-1. Initializes the `freellmproxy` git submodule
-2. Installs proxy dependencies
-3. Generates `freellmproxy/.env` with secure defaults (edit `ROUTER_DOMAIN` before production!)
-4. Deploys N proxy workers + a router worker to Cloudflare
+1. Checks wrangler auth
+2. Initializes the `freellmproxy` git submodule
+3. Installs proxy dependencies
+4. Generates secure secrets (`freellmproxy/.env`)
+5. Deploys proxy workers + router to Cloudflare
+6. Detects and prints your working endpoint URL
 
-> **Domain setup:** The deploy script does not yet configure custom domains automatically. After deploying, add your domain in the Cloudflare dashboard: Workers & Pages → `llm-proxy-router` → Settings → Domains.
+After deployment, register the proxy as a custom provider in the dashboard:
 
-After deployment, register the proxy as a custom provider in the gateway dashboard:
 1. Base64url-encode your target URL: `node -e "console.log(Buffer.from('https://api.example.com/v1').toString('base64url'))"`
-2. Construct: `https://{ROUTER_DOMAIN}/{AUTH_KEY}/{PROXY_NUM}/{BASE64_URL}`
+2. Construct: `https://{ROUTER_URL}/{AUTH_KEY}/{PROXY_NUM}/{BASE64_URL}`
 3. Add as a custom provider with that URL as the base URL
 
-Other commands:
+**Custom domain (optional):** Add `ROUTER_DOMAIN=your.domain.com` to `freellmproxy/.env` before deploying. This replaces the `workers.dev` subdomain with your own domain. The domain must be a Cloudflare-proxied zone.
 
 | Command | Purpose |
-|---------|---------|
+|---------|----------|
+| `npm run proxy:up` | Deploy everything to Cloudflare |
 | `npm run proxy:dev` | Local dev server via wrangler |
-| `npm run proxy:deploy` | Deploy all workers to Cloudflare |
 | `npm run proxy:status` | Show deployment status |
 | `npm run proxy:test` | Run proxy test suite |
 
-Adjust `PROXY_COUNT` and `ROUTER_DOMAIN` in `freellmproxy/.env`. See [the proxy's README](freellmproxy/README.md) for the full architecture.
+Adjust `PROXY_COUNT` in `freellmproxy/.env`. See [the proxy's README](freellmproxy/README.md) for the full architecture.
 
 ## Using the API
 

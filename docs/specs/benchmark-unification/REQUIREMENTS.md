@@ -78,17 +78,19 @@ Default seed:
 |--------|--------|-----------|
 | Artificial Analysis | 0.50 | Broadest model coverage, industry-standard intelligence index |
 | SWE-rebench | 0.30 | Coding-specific, high signal for developer workflows |
-| NIMStats | 0.15 | Narrowest model set (20 NIM models) — [REVISED from 0.20 per reviewer consensus] |
+| NIMStats | **0.00** | **Not an intelligence source.** Measures speed/reliability (latency, throughput, uptime), NOT accuracy or reasoning. nim_score is stored per-source for future speed scoring, but **excluded** from the intelligence composite. [REVISED v3: bug fix — NIM weight was 0.15, corrupting benchmark_score with speed data] |
 
-Weights are read on startup with an in-memory cache. The remaining 0.05 is redistributed
-to AA and SWE proportionally (i.e., effective weights become 0.526 / 0.316 / 0.158 after
-renormalization). This allows runtime tuning without code deployment.
+Only AA and SWE-rebench contribute to the intelligence composite. NIM data
+(nim_score, nim_throughput_tps, nim_avg_response_ms, nim_uptime_pct) is
+stored per-source for future use as speed/reliability seed data. Weights
+are read on startup with an in-memory cache. Runtime tuning without code
+deployment is still supported.
 
-**R4.2** When a model has scores from fewer than all three sources, the present sources'
-weights are re-normalized to sum to 1.0.
+**R4.2** When a model has scores from fewer than both intelligence sources (AA, SWE-rebench), the present sources'
+weights are re-normalized to sum to 1.0. NIM (weight 0.0) never participates in re-normalization.
 
-**R4.3** When a model has only one source, `benchmark_score` equals that source's score
-(pass-through).
+**R4.3** When a model has only one intelligence source, `benchmark_score` equals that source's score
+(pass-through). NIM-only models have `benchmark_score = NULL`.
 
 **R4.4** When a model has no scores from any source, `benchmark_score` remains NULL.
 

@@ -167,13 +167,12 @@ export function recomputeBenchmarkComposite(
         totalWeight += w;
       }
 
-      // NIM source
-      const nimW = weights.get('nim');
-      if (nimW?.enabled && row.nim_score != null) {
-        const w = effectiveWeight(nimW.weight, row.nim_score_updated, row.nim_confidence, 'nim');
-        totalWeightedScore += row.nim_score * w;
-        totalWeight += w;
-      }
+      // NIM source — EXCLUDED from intelligence composite.
+      // NIMStats measures speed/reliability (response time, throughput, uptime),
+      // NOT intelligence or accuracy. Including it in the composite corrupted
+      // benchmark_score for models that lacked AA/SWE-rebench scores.
+      // NIM data (nim_throughput_tps, nim_avg_response_ms, nim_uptime_pct) is
+      // stored per-source for future use as speed/reliability seed data.
 
       if (totalWeight <= 0) continue; // no valid sources (R4.4)
 
@@ -186,7 +185,7 @@ export function recomputeBenchmarkComposite(
       }
 
       // Composite timestamp = max of available source timestamps
-      const timestamps = [row.aa_score_updated, row.swe_rebench_score_updated, row.nim_score_updated]
+      const timestamps = [row.aa_score_updated, row.swe_rebench_score_updated]
         .filter((t: string | null) => t != null)
         .map((t: string) => new Date(t).getTime());
       const lastUpdate = timestamps.length > 0

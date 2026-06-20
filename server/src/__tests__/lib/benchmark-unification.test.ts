@@ -237,7 +237,7 @@ describe('recomputeBenchmarkComposite', () => {
     expect(row.benchmark_composite_version).toBe(1);
   });
 
-  it('R4.1: all 3 sources → weighted average with spec weights (0.50/0.30/0.15)', () => {
+  it('R4.1: 2 intelligence sources → weighted average with spec weights (0.50/0.30, NIM=0.0)', () => {
     const now = new Date().toISOString();
     const id = insertModel({
       model_id: 'all-sources-model',
@@ -251,9 +251,10 @@ describe('recomputeBenchmarkComposite', () => {
     recomputeBenchmarkComposite(db, new Set([id]), weights);
 
     const row = getModel(id);
-    // Per spec D4 worked example: (58×0.50 + 52×0.30 + 48×0.15) / 0.95 ≈ 55.47
-    const totalWeight = 0.50 + 0.30 + 0.15; // 0.95
-    const expected = (58 * 0.50 + 52 * 0.30 + 48 * 0.15) / totalWeight;
+    // NIM is excluded from intelligence composite (weight=0.0), so only
+    // AA and SWE-rebench contribute: (58×0.50 + 52×0.30) / 0.80 = 54.25
+    const totalWeight = 0.50 + 0.30; // 0.80 (NIM excluded)
+    const expected = (58 * 0.50 + 52 * 0.30) / totalWeight;
     expect(row.benchmark_score).toBeCloseTo(expected, 1);
     expect(row.benchmark_composite_version).toBe(1);
   });
@@ -347,14 +348,14 @@ describe('recomputeBenchmarkComposite', () => {
 
     const row = getModel(id);
     // AA decay at 10 days = 0.5, so effective AA weight = 0.50 * 0.5 = 0.25
-    // SWE weight = 0.30 * 1.0 = 0.30, NIM weight = 0.15 * 1.0 = 0.15
-    // Total weight = 0.25 + 0.30 + 0.15 = 0.70
+    // SWE weight = 0.30 * 1.0 = 0.30
+    // NIM weight = 0.0 (excluded from intelligence composite)
+    // Total weight = 0.25 + 0.30 = 0.55
     const aaDecay = Math.pow(0.5, 10 / 10); // 0.5
     const aaW = 0.50 * aaDecay;
     const sweW = 0.30;
-    const nimW = 0.15;
-    const totalW = aaW + sweW + nimW;
-    const expected = (58 * aaW + 52 * sweW + 48 * nimW) / totalW;
+    const totalW = aaW + sweW; // NIM excluded
+    const expected = (58 * aaW + 52 * sweW) / totalW;
     expect(row.benchmark_score).toBeCloseTo(expected, 0);
   });
 
@@ -420,12 +421,13 @@ describe('loadSourceWeights', () => {
     expect(weights.has('nim')).toBe(true);
   });
 
-  it('seed weights match spec: aa=0.50, swe=0.30, nim=0.15', () => {
+  it('seed weights match spec: aa=0.50, swe=0.30, nim=0.0 (excluded from intelligence)', () => {
     invalidateSourceWeightsCache();
     const weights = loadSourceWeights();
+    expect(weights.size).toBe(3);
     expect(weights.get('aa')?.weight).toBeCloseTo(0.50, 2);
     expect(weights.get('swe_rebench')?.weight).toBeCloseTo(0.30, 2);
-    expect(weights.get('nim')?.weight).toBeCloseTo(0.15, 2);
+    expect(weights.get('nim')?.weight).toBeCloseTo(0.0, 2);
   });
 
   it('all sources enabled by default', () => {

@@ -15,11 +15,12 @@
     "test": "npm run test -w server && npm run typecheck -w client && npm run proxy:test",
     "build": "npm run build -w server && npm run build -w client",
     "build:server": "npm run build -w server",
-    "postinstall": "node scripts/proxy-integrate.mjs init",
-    "proxy:deploy": "node scripts/proxy-integrate.mjs deploy",
-    "proxy:dev": "node scripts/proxy-integrate.mjs dev",
-    "proxy:status": "node scripts/proxy-integrate.mjs status",
-    "proxy:test": "node scripts/proxy-integrate.mjs test"
+    "postinstall": "node scripts/proxy-up.mjs init",
+    "proxy:deploy": "node scripts/proxy-up.mjs up",
+    "proxy:up": "node scripts/proxy-up.mjs up",
+    "proxy:dev": "node scripts/proxy-up.mjs dev",
+    "proxy:status": "node scripts/proxy-up.mjs status",
+    "proxy:test": "node scripts/proxy-up.mjs test"
   },
   "devDependencies": {
     "concurrently": "^9.1.2"

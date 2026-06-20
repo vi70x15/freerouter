@@ -76,6 +76,7 @@ export function migrateDbSchema(db: Database.Database) {
   migrateQuirksV1(db);
   migrateModelsV32CommandCode(db);
   migrateModelsV33BenchmarkScore(db);
+  migrateNIMWeightZero(db);
 
   // OpenRouter/OpenCode free-only enforcement is now a one-time versioned
   // migration (v2) — user re-enables persist across reboots.
@@ -306,11 +307,15 @@ function ensureBenchmarkSourceWeightsTable(db: Database.Database) {
     )
   `);
 
-  // Seed default weights (idempotent) — per spec R4.1: aa=0.50, swe=0.30, nim=0.15
+  // Seed default weights (idempotent)
+  // aa=0.50, swe_rebench=0.30: intelligence sources, blended into benchmark_score.
+  // nim=0.0: NIMStats measures speed/reliability (response time, throughput,
+  // uptime), NOT intelligence. nim_score is stored per-source but EXCLUDED
+  // from the intelligence composite — see recomputeBenchmarkComposite().
   const insert = db.prepare(`INSERT OR IGNORE INTO benchmark_source_weights (name, weight, enabled) VALUES (?, ?, 1)`);
   insert.run('aa', 0.50);
   insert.run('swe_rebench', 0.30);
-  insert.run('nim', 0.15);
+  insert.run('nim', 0.0);
 }
 
 // ── Dynamic Degradation: persistent penalty state ─────────────────────────
@@ -2595,4 +2600,17 @@ function migrateModelsV32CommandCode(db: Database.Database) {
     }
   });
   tx();
+}
+
+// ── V35: Set NIM benchmark weight to 0 (speed/reliability, not intelligence) ──
+function migrateNIMWeightZero(db: Database.Database) {
+  try {
+    const row = db.prepare("SELECT weight FROM benchmark_source_weights WHERE name = 'nim'").get() as { weight: number } | undefined;
+    if (row && row.weight !== 0) {
+      db.prepare("UPDATE benchmark_source_weights SET weight = 0.0, updated_at = CURRENT_TIMESTAMP WHERE name = 'nim'").run();
+      console.log('Set NIM benchmark weight to 0.0 (NIMStats is speed/reliability, not intelligence)');
+    }
+  } catch {
+    // Table may not exist yet in older DBs — safe to skip
+  }
 }

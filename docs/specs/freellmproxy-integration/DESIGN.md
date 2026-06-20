@@ -1,332 +1,411 @@
-# Design — FreeLLMProxy Submodule Integration
+# Design — FreeLLMProxy Submodule Integration (v2 — Todd Howard Edition)
 
 ---
 
 ## D1: Current Architecture (As-Is)
 
 ```
-~/freerouter/                         ~/freeproxy/
-├── server/                            ├── src/
-│   ├── src/                           │   ├── worker.ts      (dispatch by WORKER_ROLE)
-│   │   ├── app.ts      (Express)      │   ├── router.ts      (auth, URL decode, proxy select)
-│   │   ├── routes/                    │   ├── proxy.ts       (header strip, fake IP, upstream fetch)
-│   │   └── providers/                │   ├── fake-ip.ts
-│   └── data/          (SQLite)        │   ├── base64url.ts
-├── client/           (Vite/React)    │   ├── public.ts      (URL encoder page)
-├── shared/                            │   ├── http.ts
-├── scripts/cli.mjs    (api start/stop)│   ├── url-normalize.ts
-├── package.json       (monorepo root) │   └── regions.txt
-└── docker-compose.yml                 ├── scripts/deploy.ts  (TOML gen + wrangler deploy)
-                                       ├── wrangler.toml     (base config for dev)
-                                       ├── package.json
-                                       └── .env.example
+~/freellmapi/                         ~/freeproxy/
+├── server/  (Express + SQLite)        ├── src/
+├── client/  (React + Vite)           │   ├── worker.ts       (dispatch by WORKER_ROLE)
+├── shared/  (Types)                  │   ├── router.ts       (auth, URL decode, proxy select)
+├── scripts/cli.mjs                   │   ├── proxy.ts        (header strip, fake IP, upstream fetch)
+└── package.json                      │   ├── fake-ip.ts / base64url.ts / http.ts
+                                       │   ├── public.ts      (URL encoder page)
+                                       │   └── url-normalize.ts / regions.txt
+                                       ├── scripts/deploy.ts  (TOML gen + wrangler deploy)
+                                       ├── wrangler.toml      (base config for dev)
+                                       └── package.json
 ```
 
-Two completely separate git repos. The proxy lives at `~/freeproxy` tracking `animaios/freeproxy` (fork of `vadash/llm-proxy`). The gateway knows nothing about it.
+Two separate repos. The proxy requires `ROUTER_DOMAIN` in `.env` and hardcodes `routes = [{ pattern, custom_domain = true }]` in every generated router TOML. No workers.dev path exists.
 
 ---
 
 ## D2: Target Architecture (To-Be)
 
 ```
-~/freerouter/
+~/freellmapi/
 ├── server/
 ├── client/
 ├── shared/
 ├── scripts/
-│   ├── cli.mjs           (api start/stop)
-│   └── proxy-integrate.mjs  ← NEW: auto-init, env bootstrap, deploy orchestration
-├── freellmproxy/             ← GIT SUBMODULE (was ~/freeproxy)
-│   ├── src/                  (unchanged)
-│   ├── scripts/deploy.ts     (unchanged)
-│   ├── wrangler.toml         (unchanged)
-│   ├── package.json          (unchanged)
-│   ├── .env                  (auto-generated, gitignored)
-│   └── node_modules/         (installed via postinstall)
-├── .gitmodules               ← NEW: tracks freellmproxy
-├── package.json              ← MODIFIED: add scripts + postinstall
-└── .github/workflows/ci.yml  ← MODIFIED: add submodule checkout + proxy test
+│   ├── cli.mjs                (api start/stop)
+│   └── proxy-up.mjs           ← NEW: full orchestrator
+├── freellmproxy/              ← GIT SUBMODULE (no source changes needed)
+│   ├── src/                   (unchanged)
+│   ├── scripts/deploy.ts      (unchanged — but called differently, see D6)
+│   ├── .env                   (auto-generated, no ROUTER_DOMAIN by default)
+│   └── node_modules/          (installed via postinstall)
+├── .gitmodules                ← NEW
+├── package.json               ← MODIFIED: add scripts + postinstall
+└── .github/workflows/ci.yml   ← MODIFIED: add submodule checkout
 ```
 
-The proxy becomes a subtree of the monorepo via git submodule. All proxy source files remain untouched. Integration logic lives entirely in the monorepo's `scripts/` and `package.json`.
+The orchestration script `proxy-up.mjs` replaces `proxy-integrate.mjs`. Same role, better name, more capabilities.
 
 ---
 
-## D3: Submodule Configuration
+## D3: The `proxy:up` Flow
 
-### .gitmodules
+This is the core design. Everything flows from here.
 
-```ini
-[submodule "freellmproxy"]
-	path = freellmproxy
-	url = https://github.com/animaios/freeproxy.git
-	branch = main
 ```
-
-### Adding the submodule (one-time, during implementation)
-
-```bash
-# From the monorepo root
-git submodule add -b main https://github.com/animaios/freeproxy.git freellmproxy
-git submodule update --init --recursive
-```
-
-This creates:
-- `.gitmodules` (tracked)
-- `freellmproxy/` (gitlink — the submodule pointer)
-- `.git/modules/freellmproxy/` (local, not tracked)
-
-### Updating the submodule (daily driver workflow)
-
-```bash
-# Pull latest from upstream
-git submodule update --remote freellmproxy
-# Or from inside the submodule:
-cd freellmproxy && git pull origin main
+npm run proxy:up
+     │
+     ▼
+┌─────────────────────────────────────────────────────────────┐
+│  1. WRANGLER CHECK                                          │
+│     which wrangler → found?                                 │
+│     ├─ NO  → ⚠️ wrangler not found. Install: ...  → exit 1 │
+│     └─ YES → wrangler whoami → exits 0?                    │
+│              ├─ NO  → ⚠️ wrangler not logged in. Run: ...  │
+│              │        → exit 1                              │
+│              └─ YES → continue                              │
+│                                                             │
+│  2. SUBMODULE + DEPS                                        │
+│     freellmproxy/ exists?                                   │
+│     ├─ NO  → .git/modules/freellmproxy?                    │
+│     │        ├─ YES → git submodule update --init --rec     │
+│     │        └─ NO  → ⚠️ skipping → exit 1                 │
+│     └─ YES → freellmproxy/node_modules?                     │
+│              └─ NO → npm install --prefix freellmproxy      │
+│                                                             │
+│  3. ENV BOOTSTRAP                                           │
+│     freellmproxy/.env exists?                               │
+│     ├─ YES → read it (never overwrite)                     │
+│     └─ NO  → generate:                                     │
+│          AUTH_KEY = randomBytes(16).hex slice(0,16)         │
+│          INTERNAL_AUTH_SECRET = randomBytes(32).hex         │
+│          PROXY_COUNT=3                                      │
+│          (NO ROUTER_DOMAIN — workers.dev default)           │
+│                                                             │
+│  4. DEPLOY (via proxy's deploy.ts)                         │
+│     Load .env into process.env                              │
+│     Detect ROUTER_DOMAIN in .env:                           │
+│       ├─ ABSENT → router TOML gets NO routes section        │
+│       │           → workers.dev auto-activates              │
+│       └─ PRESENT → router TOML gets routes=[{pattern,...}]  │
+│                   → custom domain overrides workers.dev     │
+│     Spawn: npx tsx scripts/deploy.ts                        │
+│       cwd: freellmproxy/                                    │
+│       stdio: pipe (to capture stdout for URL extraction)     │
+│                                                             │
+│  5. EXTRACT ENDPOINT URL                                    │
+│     Parse deploy.ts stdout for:                             │
+│       /https:\/\/[^\s]+workers\.dev/                        │
+│     Fallback if not found:                                  │
+│       wrangler whoami --json → account name → construct URL │
+│                                                             │
+│  6. PERSIST DETECTED URL                                    │
+│     If DETECTED_ROUTER_URL not in .env:                      │
+│       append DETECTED_ROUTER_URL=<url> to .env              │
+│                                                             │
+│  7. PRINT "READY" BLOCK                                     │
+│     🚀 READY                                                │
+│                                                             │
+│     Router URL:  https://llm-proxy-router.xxx.workers.dev   │
+│     Auth key:    a1b2c3d4e5f6a7b8                           │
+│                                                             │
+│     Example request:                                        │
+│     POST https://llm-proxy-router.xxx.workers.dev/          │
+│          a1b2c3d4e5f6a7b8/1/<BASE64_URL>                    │
+└─────────────────────────────────────────────────────────────┘
 ```
 
 ---
 
-## D4: Postinstall / Auto-Init Script
+## D4: Workers.dev vs Custom Domain — How It Works
 
-### `scripts/proxy-integrate.mjs`
+### Cloudflare Workers routing (platform behavior, not our code)
 
-This is the **single orchestration script** that handles everything. It runs as `postinstall` and also as the backend for `npm run proxy:deploy`.
+When a Worker is deployed:
+
+| Scenario | TOML `routes` section | Result |
+|----------|----------------------|--------|
+| **No routes** | Omitted | Worker is accessible at `https://<name>.<subdomain>.workers.dev` |
+| **Custom domain route** | `routes = [{ pattern = "my.domain", custom_domain = true }]` | Worker is accessible at `https://my.domain/`. Workers.dev still exists but is secondary |
+
+This means: **omitting the `routes` section is the workers.dev path.** We don't need to explicitly configure `workers.dev` — Cloudflare does it automatically.
+
+### What changes in the generated TOML
+
+**Before (current proxy `deploy.ts`):**
+```toml
+[routes]
+routes = [{ pattern = "router.example.com", custom_domain = true }]
+```
+Always requires a domain. Breaks if user hasn't set one up.
+
+**After (our orchestration script controls TOML generation):**
+```toml
+# ROUTER_DOMAIN not set — workers.dev mode (default)
+# No routes section → Cloudflare assigns *.workers.dev
+```
+```toml
+# ROUTER_DOMAIN=proxy.mydomain.com — custom domain mode (opt-in)
+routes = [{ pattern = "proxy.mydomain.com", custom_domain = true }]
+```
+
+### How we control TOML generation
+
+The proxy's `deploy.ts` `generateRouterToml()` always includes `routes`. We have two options:
+
+**Option A (preferred): Modify `generateRouterToml()` to accept optional `routerDomain`.**
+If `routerDomain` is null/empty, skip the `routes` section. This is a small, clean change to the proxy — a 5-line conditional. It maintains backward compat (passing a string still includes routes).
+
+**Option B: Our orchestration script generates its own TOML.**
+This duplicates `generateRouterToml()` logic and drifts from the proxy's deploy script. Invasive and fragile.
+
+**We choose Option A.** This means one small proxy-side change: `generateRouterToml` gains an optional `routerDomain` parameter. If falsy, the `routes` key is omitted. This PR should be submitted upstream to `vadash/llm-proxy` as well — it's a universally useful improvement.
+
+---
+
+## D5: Auto-Endpoint Detection
+
+### Primary: Parse wrangler deploy stdout
+
+Wrangler prints on successful deploy:
+```
+Uploaded llm-proxy-router
+Published llm-proxy-router (1.23 sec)
+  https://llm-proxy-router.some-subdomain.workers.dev
+```
+
+Regex: `/https:\/\/[^\s]+\.workers\.dev/`
+
+This is captured by the orchestration script because we spawn `deploy.ts` with `stdio: 'pipe'` (not `'inherit'`). We parse stdout, extract the URL, then replay stdout to the user's terminal (or just print our own summary).
+
+### Fallback: Construct from account info
+
+If the regex fails (wrangler output format changed), we fall back to:
+1. `wrangler whoami --json` → parse `accounts[0].name`
+2. Convert account name to subdomain slug: lowercase, replace non-alphanumeric with `-`, deduplicate `-`
+3. Construct: `https://llm-proxy-router.<slug>.workers.dev`
+4. Print: `⚠️ Router URL was constructed (not auto-detected). Verify it works.`
+
+### Persist detected URL
+
+Write `DETECTED_ROUTER_URL=<url>` to `freellmproxy/.env` if the key doesn't already exist. This is for downstream consumption (scripts, docs, gateway custom provider auto-wiring in future).
+
+---
+
+## D6: Deploy Script Invocation
+
+The proxy's `scripts/deploy.ts` reads `.env` via `loadEnv()` and calls `wrangler deploy -c <config>`. We must ensure:
+
+1. The `.env` file exists before `deploy.ts` runs (our orchestration handles this)
+2. `ROUTER_DOMAIN` is passed correctly: if absent from `.env`, `deploy.ts` must not fail. Currently it calls `requireEnv("ROUTER_DOMAIN", 1)` which **exits 1**.
+
+This is the one proxy code change we need: make `ROUTER_DOMAIN` optional in `deploy.ts`. If absent, `routerDomain` is `undefined`, and `generateRouterToml` receives it as `undefined`, producing TOML without routes.
+
+**Change in `scripts/deploy.ts`:**
+```typescript
+// Before:
+const routerDomain = requireEnv("ROUTER_DOMAIN", 1);
+
+// After:
+const routerDomain = process.env.ROUTER_DOMAIN || undefined;
+// generateRouterToml already takes routerDomain param — we pass undefined
+```
+
+And in `generateRouterToml`:
+```typescript
+function generateRouterToml(proxyCount: number, internalSecret: string, authKey: string, routerDomain?: string): string {
+  // ...
+  const config: Record<string, unknown> = {
+    name: "llm-proxy-router",
+    // ...
+    vars: { ... },
+    services,
+  };
+  
+  // Only add routes if domain is specified
+  if (routerDomain) {
+    config.routes = [{ pattern: routerDomain, custom_domain: true }];
+  }
+  
+  return tomlStringify(config);
+}
+```
+
+This is a **backward-compatible change**: if ROUTER_DOMAIN exists in .env, behavior is identical. If absent, the default switches to workers.dev.
+
+---
+
+## D7: `scripts/proxy-up.mjs` — Full Design
+
+### Command dispatch
 
 ```
-proxy-integrate.mjs <command>
+proxy-up.mjs <command>
 
 Commands:
-  init        Auto-init submodule if missing, install deps
-  env         Bootstrap freellmproxy/.env if missing
-  deploy      Full pipeline: init → env → install → wrangler deploy
-  dev         Run wrangler dev
-  status      Run wrangler deployments list
-  test        Run proxy vitest
+  up        Full pipeline: auth check → init → env → deploy → detect URL → print
+  init      Submodule + deps only
+  env       Bootstrap .env only
+  dev       Wrangler dev
+  status    Wrangler deployments list
+  test      Proxy vitest
 ```
 
-### init flow
+### Module structure
 
 ```
-┌─────────────────────────────────────────────┐
-│  npm install (root)                         │
-│                                             │
-│  1. Root npm workspaces install             │
-│     (server, client, shared)               │
-│                                             │
-│  2. postinstall hook fires                 │
-│     → node scripts/proxy-integrate.mjs init│
-│                                             │
-│  3. Check: does freellmproxy/ exist?        │
-│     ├─ YES → Check: node_modules/ ?         │
-│     │        ├─ YES → done                  │
-│     │        └─ NO  → npm install --prefix  │
-│     │                 freellmproxy          │
-│     └─ NO  → Check: .git/modules/freellmproxy? │
-│              ├─ YES → git submodule update  │
-│              │        --init --recursive     │
-│              │        then npm install       │
-│              └─ NO  → echo warning, continue│
-│                       (non-fatal for CI)    │
-└─────────────────────────────────────────────┘
+proxy-up.mjs
+├── main()              — argv parse → dispatch
+├── cmdUp()             — R3 full pipeline
+│   ├── checkWrangler()
+│   ├── ensureSubmodule()
+│   ├── ensureDeps()
+│   ├── bootstrapEnv()
+│   ├── runDeploy()     — spawn deploy.ts, capture stdout
+│   ├── extractUrl()   — regex parse or fallback
+│   ├── persistUrl()   — append to .env if needed
+│   └── printReady()    — the "READY" block
+├── cmdInit()           — R2.2/R2.3 submodule + deps
+├── cmdEnv()            — R4 bootstrap only
+├── cmdDev()            — wrangler dev, stdio inherit
+├── cmdStatus()         — wrangler deployments list, stdio inherit
+├── cmdTest()           — npm test --prefix freellmproxy
+├── helpers
+│   ├── ROOT            — dirname(import.meta.url) → monorepo root
+│   ├── PROXY_DIR      — path.join(ROOT, "freellmproxy")
+│   ├── readEnv()       — parse .env file → Map
+│   ├── writeEnv()      — append key=value to .env (idempotent)
+│   ├── execAsync()     — promisified exec with cwd
+│   ├── spawnAsync()    — promisified spawn with stdio control
+│   ├── randomHex(n)    — crypto.randomBytes(n).toString('hex')
+│   └── checkWrangler() — which wrangler + whoami → {ok, email?}
 ```
 
-Key invariants:
-- **Idempotent**: running twice is a no-op
-- **Non-fatal on missing**: if `.git/modules/freellmproxy/` doesn't exist (shallow clone, no submodules), log a warning and continue. Don't block the main gateway install.
-- **No interactive prompts**: everything is automated
+### Key implementation details
+
+- **ROOT calculation**: Same pattern as `scripts/cli.mjs`:
+  ```javascript
+  const ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
+  ```
+- **Env generation**: Use Node's `crypto` module. No external deps.
+- **Deploy spawn**: `spawnAsync("npx", ["tsx", "scripts/deploy.ts"], { cwd: PROXY_DIR, stdio: ["ignore", "pipe", "pipe"] })`. Capture both stdout and stderr. Print them after parsing (or stream them live and tee to a buffer).
+- **URL extraction**: After deploy exits 0, scan combined stdout+stderr for the regex. If found, that's the URL. If not, fallback to `wrangler whoami --json`.
+- **Ready block**: Read AUTH_KEY from `.env` for the print. Include the full example URL.
 
 ---
 
-## D5: Environment Bootstrap
+## D8: Router TOML — Two Modes
 
-```
-┌─────────────────────────────────────────────┐
-│  node scripts/proxy-integrate.mjs env       │
-│                                             │
-│  1. Check: does freellmproxy/.env exist?    │
-│     ├─ YES → skip (never overwrite)         │
-│     └─ NO  → Generate:                      │
-│                                             │
-│       AUTH_KEY = ?                          │
-│         ├─ Read freerouter/.env              │
-│         │  ENCRYPTION_KEY → first 16 hex    │
-│         └─ Fallback:                        │
-│            crypto.randomBytes(16) → hex     │
-│            → slice(0, 16)                   │
-│                                             │
-│       INTERNAL_AUTH_SECRET = ?              │
-│         └─ Always fresh:                    │
-│            crypto.randomBytes(32).toString   │
-│            ('hex')                           │
-│                                             │
-│       PROXY_COUNT = 3                       │
-│                                             │
-│       ROUTER_DOMAIN = ?                     │
-│         ├─ Read freerouter/.env              │
-│         │  PROXY_ROUTER_DOMAIN if set        │
-│         └─ Fallback: router.example.com     │
-│                                             │
-│  2. Write freellmproxy/.env                 │
-│  3. Print: ✅ Generated freellmproxy/.env   │
-│     with defaults. Edit ROUTER_DOMAIN       │
-│     before deploying to production.         │
-│     Note: custom domain must also be        │
-│     configured in the Cloudflare dashboard. │
-└─────────────────────────────────────────────┘
+### Default mode (workers.dev)
+
+```toml
+name = "llm-proxy-router"
+main = "../src/worker.ts"
+compatibility_date = "2024-12-01"
+placement = { mode = "off" }
+
+[vars]
+WORKER_ROLE = "router"
+AUTH_KEY = "a1b2c3d4e5f6a7b8"
+INTERNAL_AUTH_SECRET = "64hex..."
+PROXY_COUNT = "3"
+ROUTER_DOMAIN = ""
+
+[[services]]
+binding = "PROXY_1"
+service = "llm-proxy-01"
+
+[[services]]
+binding = "PROXY_2"
+service = "llm-proxy-02"
+
+[[services]]
+binding = "PROXY_3"
+service = "llm-proxy-03"
 ```
 
-The `AUTH_KEY` derivation from the gateway's `ENCRYPTION_KEY` creates a natural link: if you have a working gateway, you already have a strong key source. The `INTERNAL_AUTH_SECRET` is always freshly generated because it's router↔proxy internal auth — there's no reason to reuse the gateway's key for a different trust boundary.
+Note: no `routes` section. Cloudflare auto-assigns `workers.dev`.
+
+### Custom domain mode (opt-in)
+
+```toml
+# Same as above, plus:
+routes = [{ pattern = "proxy.mydomain.com", custom_domain = true }]
+```
 
 ---
 
-## D6: Deploy Pipeline
-
-```
-┌─────────────────────────────────────────────┐
-│  npm run proxy:deploy                       │
-│     = node scripts/proxy-integrate.mjs deploy│
-│                                             │
-│  1. Check wrangler available               │
-│     (try `wrangler --version`, fallback     │
-│      to `npx wrangler --version` in proxy)  │
-│     └─ Both fail → print error, exit 1      │
-│                                             │
-│  2. Run init (D4)                           │
-│     Ensure submodule + deps                 │
-│                                             │
-│  3. Run env (D5)                            │
-│     Ensure .env exists                      │
-│                                             │
-│  4. cd freellmproxy &&                      │
-│     npx tsx scripts/deploy.ts               │
-│     └─ Existing deploy script unchanged     │
-│        - Reads .env itself (no need to      │
-│          pre-load into process.env)         │
-│        - Generates TOML into dist/          │
-│        - Deploys proxies in parallel         │
-│        - Deploys router last                │
-│        - Retries failures 3x                │
-│        - Prints summary table               │
-│                                             │
-│  5. Exit with deploy.ts exit code           │
-└─────────────────────────────────────────────┘
-```
-
-The deploy script is `scripts/deploy.ts` which already exists in the proxy repo. We invoke it unchanged via `npx tsx scripts/deploy.ts` (the proxy has `tsx` as a devDependency). The deploy script reads `.env` itself — no need to pre-load env vars into `process.env`. The orchestration script only handles the steps *before* deploy: prerequisites, submodule, env.
-
----
-
-## D7: NPM Script Wiring
-
-### Root `package.json` additions
+## D9: NPM Script Wiring
 
 ```jsonc
 {
   "scripts": {
-    // Existing (modified):
+    // Existing (unchanged):
     "dev": "concurrently --kill-others-on-fail ...",
     "dev:lan": "concurrently ...",
-    "test": "npm run test -w server && npm run typecheck -w client && npm run proxy:test",
     "build": "npm run build -w server && npm run build -w client",
     "build:server": "npm run build -w server",
 
+    // Modified:
+    "test": "npm run test -w server && npm run typecheck -w client && npm run proxy:test",
+
     // NEW:
-    "postinstall": "node scripts/proxy-integrate.mjs init",
-    "proxy:deploy": "node scripts/proxy-integrate.mjs deploy",
-    "proxy:dev": "cd freellmproxy && npx wrangler dev",
-    "proxy:status": "cd freellmproxy && npx wrangler deployments list",
-    "proxy:test": "node scripts/proxy-integrate.mjs test"
+    "postinstall": "node scripts/proxy-up.mjs init",
+    "proxy:up": "node scripts/proxy-up.mjs up",
+    "proxy:deploy": "node scripts/proxy-up.mjs up",     // alias
+    "proxy:dev": "node scripts/proxy-up.mjs dev",
+    "proxy:status": "node scripts/proxy-up.mjs status",
+    "proxy:test": "node scripts/proxy-up.mjs test"
   }
 }
 ```
 
-> **Note on `proxy:test`:** Uses the orchestration script (not `cd && npm test`) so it can handle the case where `freellmproxy/` is absent gracefully (R12.3). When the submodule exists, it delegates to `npm test --prefix freellmproxy`.
+### Why `postinstall` (not `prepare`)
 
-### Why `postinstall` and not `prepare`
-
-`prepare` runs on `npm install` **and** `npm pack`. `postinstall` runs only on `npm install`. Since our script installs a submodule's deps, we want `postinstall` — we don't want it running during `npm pack`. 
-
-However, `postinstall` has a caveat: it runs after every `npm install` (including in CI). The script must be idempotent (R6.2) and non-fatal on missing submodule (R6.3).
+Same reasoning as v1: `prepare` runs on `npm pack`. `postinstall` only on `npm install`. Our script installs a submodule's deps — we don't want that during `npm pack`.
 
 ---
 
-## D8: CI Workflow Modification
-
-The current CI runs individual workspace commands directly (not the root `npm test` script). The modification adds submodule checkout and a proxy test step.
-
-### `.github/workflows/ci.yml` — full target state
+## D10: CI Workflow
 
 ```yaml
-jobs:
-  test:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          submodules: recursive   # ← NEW: ensures freellmproxy/ is populated
+- uses: actions/checkout@v4
+  with:
+    submodules: recursive
 
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 20
-          cache: npm
-
-      - run: npm install --include=dev   # postinstall will install proxy deps
-
-      - run: npm run test:coverage -w server
-      - run: npm run proxy:test          # ← NEW: proxy vitest suite
-      - run: npm run typecheck -w client
-      - run: npm run build
-
-      # Coverage upload (unchanged)
+- run: npm install   # postinstall handles proxy deps
+- run: npm test      # includes proxy:test
 ```
 
-> **Important:** CI does **not** run `npm test` (the root script). Each step runs independently so failures are attributed clearly. The `proxy:test` step (R10.1 item 4) is a separate CI step, not chained into the root `test` script.
-
-If the `submodules: recursive` checkout option is missing, the postinstall script will detect the absent submodule directory, log a warning, and continue. The `proxy:test` step will fail with a clear error, which is the correct CI signal.
+No deploy step. No wrangler auth in CI.
 
 ---
 
-## D9: Gateway → Proxy Registration (Configuration Only)
+## D11: Gateway → Proxy Usage (Configuration Only)
 
-The gateway already supports custom providers (`server/src/routes/custom.ts` — `createProviderSchema`, `buildProviderFor`). To route traffic through the deployed proxy:
+After `proxy:up` prints the endpoint, the user wires it into the gateway as a custom provider:
 
-1. **Configure the domain**: In the Cloudflare dashboard, add a custom domain for the `llm-proxy-router` worker (Workers & Pages → Settings → Domains). The proxy's `deploy.ts` does not yet configure routes automatically.
-2. **Determine your target**: e.g., `https://api.openai.com/v1`
-3. **Base64url-encode it**: `node -e "console.log(Buffer.from('https://api.openai.com/v1').toString('base64url'))"` → `aHR0cHM6Ly9hcGkub3BlbmFpLmNvbS92MQ`
-4. **Construct proxy URL**: `https://{ROUTER_DOMAIN}/{AUTH_KEY}/{PROXY_NUM}/{BASE64_URL}`
-   e.g., `https://router.example.com/myauthkey/1/aHR0cHM6Ly9hcGkub3BlbmFpLmNvbS92MQ`
-5. **In the dashboard**: Keys page → Add custom provider → Base URL = the proxy URL → Done
+1. Get the router URL and AUTH_KEY from the deploy output
+2. Base64url-encode the target upstream: `node -e "console.log(Buffer.from('https://api.openai.com/v1').toString('base64url'))"`
+3. Construct proxy URL: `https://<router-url>/<AUTH_KEY>/<PROXY_NUM>/<BASE64_URL>`
+4. Dashboard → Add custom provider → Base URL = that proxy URL
 
-The proxy auto-discovers models via `/v1/models`. The request flow becomes:
-
-```
-Client → Gateway (port 3001)
-  → Cloud Proxy Router (router.example.com)
-    → Proxy Worker #N (Azure region)
-      → Upstream API (with fake IP, stripped headers)
-```
-
-This is a pure configuration step. No gateway code changes.
+No gateway code changes. The proxy is just another OpenAI-compatible endpoint from the gateway's perspective.
 
 ---
 
-## D10: Rollback Path
+## D12: Proxy Code Changes Required
 
-```
-Remove submodule:
-  git submodule deinit -f freellmproxy
-  git rm -f freellmproxy
-  rm -rf .git/modules/freellmproxy
-  # Remove proxy:* scripts from package.json
-  # Remove postinstall script
-  # Remove .gitmodules if empty
+This is the complete list of proxy-side changes. All are backward-compatible.
 
-Remove the proxy-integrate.mjs script:
-  git rm scripts/proxy-integrate.mjs
+| File | Change | Lines | Breaking? |
+|------|--------|-------|-----------|
+| `scripts/deploy.ts` → `requireEnv` | Make `ROUTER_DOMAIN` optional: `process.env.ROUTER_DOMAIN \|\| undefined` | ~1 line | No |
+| `scripts/deploy.ts` → `generateRouterToml` | Accept optional `routerDomain`: if falsy, omit `routes` section. Also: if set, include `ROUTER_DOMAIN` in vars | ~5 lines | No |
+| `scripts/deploy.ts` → `runWranglerDeploy` | Return `stdout` string in the result object (already does, just verify it's propagated) | 0 lines | No |
 
-Revert CI:
-  Remove submodules: recursive from checkout
+Total: ~6 lines changed in the proxy. No source code, no types, no tests need modification.
 
-Result: Monorepo works exactly as before. Deployed Cloudflare Workers are unaffected.
-```
+---
+
+## D13: Rollback
+
+Same as v1. Removing the submodule is clean. Deployed workers are unaffected.

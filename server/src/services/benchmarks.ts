@@ -227,6 +227,8 @@ export class BenchmarkService {
    * Fetch and upsert NIM scores into per-source columns ONLY.
    * NIM writes to: nim_score, nim_score_updated, nim_confidence,
    *   nim_throughput_tps, nim_avg_response_ms, nim_uptime_pct.
+   * NIM scores are stored per-source but EXCLUDED from the intelligence composite.
+   * NIM measures speed/reliability, not intelligence. See recomputeBenchmarkComposite.
    * Uses canonical_model_key for matching.
    * Returns affected model IDs for composite recomputation.
    */
