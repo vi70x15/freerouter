@@ -79,6 +79,9 @@ describe('Provider-Outage Fast-Fail — skipModels integration', () => {
     process.env.DEV_MODE = 'true';
     process.env.NODE_ENV = 'test';
     initDb(':memory:');
+    // Wipe seeded catalog so each test controls its own models/keys
+    // (same pattern as router-bandit.test.ts).
+    getDb().exec('DELETE FROM fallback_config; DELETE FROM api_keys; DELETE FROM models; DELETE FROM requests;');
     setRoutingStrategy('priority');
     const db = getDb();
 

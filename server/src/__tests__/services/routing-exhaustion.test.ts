@@ -56,13 +56,13 @@ describe('Routing Key Exhaustion', () => {
     // Pro is higher priority (priority 1), Flash is lower (priority 2)
     db.prepare("INSERT INTO models (platform, model_id, display_name, intelligence_rank, speed_rank, enabled) VALUES ('google', 'gemini-1.5-pro', 'Pro', 1, 1, 1)").run();
     db.prepare("INSERT INTO models (platform, model_id, display_name, intelligence_rank, speed_rank, enabled) VALUES ('google', 'gemini-1.5-flash', 'Flash', 2, 2, 1)").run();
-    
-    const proId = db.prepare("SELECT id FROM models WHERE model_id = 'gemini-1.5-pro'").get().id;
-    const flashId = db.prepare("SELECT id FROM models WHERE model_id = 'gemini-1.5-flash'").get().id;
-    
+
+    const proId = (db.prepare("SELECT id FROM models WHERE model_id = 'gemini-1.5-pro'").get() as { id: number }).id;
+    const flashId = (db.prepare("SELECT id FROM models WHERE model_id = 'gemini-1.5-flash'").get() as { id: number }).id;
+
     db.prepare("INSERT INTO fallback_config (model_db_id, priority, enabled) VALUES (?, 1, 1)").run(proId);
     db.prepare("INSERT INTO fallback_config (model_db_id, priority, enabled) VALUES (?, 2, 1)").run(flashId);
-    
+
     // Setup: 2 keys for Google
     db.prepare("INSERT INTO api_keys (platform, label, encrypted_key, iv, auth_tag, status, enabled) VALUES ('google', 'Key A', 'enc', 'iv', 'tag', 'healthy', 1)").run();
     db.prepare("INSERT INTO api_keys (platform, label, encrypted_key, iv, auth_tag, status, enabled) VALUES ('google', 'Key B', 'enc', 'iv', 'tag', 'healthy', 1)").run();
@@ -76,14 +76,14 @@ describe('Routing Key Exhaustion', () => {
 
   it('should skip exhausted Key B and use functional Key A for the same high-priority model', () => {
     const db = getDb();
-    const keys = db.prepare("SELECT id, label FROM api_keys").all();
-    const keyA = keys.find(k => k.label === 'Key A');
-    const keyB = keys.find(k => k.label === 'Key B');
+    const keys = db.prepare("SELECT id, label FROM api_keys").all() as { id: number; label: string }[];
+    const keyA = keys.find((k: { id: number; label: string }) => k.label === 'Key A')!;
+    const keyB = keys.find((k: { id: number; label: string }) => k.label === 'Key B')!;
 
     // Mock behavior:
     // Key B is exhausted (returns false for canMakeRequest)
     // Key A is functional (returns true)
-    (ratelimit.canMakeRequest as any).mockImplementation((platform, modelId, keyId) => {
+    (ratelimit.canMakeRequest as any).mockImplementation((platform: string, modelId: string, keyId: number) => {
       if (keyId === keyB.id) return false;
       if (keyId === keyA.id) return true;
       return true;
@@ -122,7 +122,7 @@ describe('Routing Key Exhaustion', () => {
   describe('skipModels (model-level 404 skip)', () => {
     it('skips every key of a skipped model and routes to the next model', () => {
       const db = getDb();
-      const proId = db.prepare("SELECT id FROM models WHERE model_id = 'gemini-1.5-pro'").get().id;
+      const proId = (db.prepare("SELECT id FROM models WHERE model_id = 'gemini-1.5-pro'").get() as { id: number }).id;
 
       // Both keys have quota — without skipModels, Pro would be chosen.
       (ratelimit.canMakeRequest as any).mockReturnValue(true);
@@ -144,7 +144,7 @@ describe('Routing Key Exhaustion', () => {
 
     it('overrides a sticky/preferred model that has been skipped', () => {
       const db = getDb();
-      const proId = db.prepare("SELECT id FROM models WHERE model_id = 'gemini-1.5-pro'").get().id;
+      const proId = (db.prepare("SELECT id FROM models WHERE model_id = 'gemini-1.5-pro'").get() as { id: number }).id;
 
       (ratelimit.canMakeRequest as any).mockReturnValue(true);
       (ratelimit.canUseTokens as any).mockReturnValue(true);

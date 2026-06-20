@@ -337,6 +337,8 @@ export interface AnalyticsSummary {
   totalInputTokens: number;
   totalOutputTokens: number;
   avgLatencyMs: number;
+  pinnedRequests: number;
+  pinHonoredRequests: number;
 }
 
 export interface PlatformStats {
@@ -365,6 +367,33 @@ export interface RequestLog {
   latencyMs: number;
   error: string | null;
   createdAt: string;
+}
+
+export interface ModelStats {
+  platform: string;
+  modelId: string;
+  displayName: string;
+  requests: number;
+  successRate: number;
+  avgLatencyMs: number;
+  totalInputTokens: number;
+  totalOutputTokens: number;
+  pinnedRequests: number;
+}
+
+export interface ErrorEntry {
+  id: number;
+  platform: string;
+  modelId: string;
+  error: string | null;
+  latencyMs: number;
+  createdAt: string;
+}
+
+export interface ErrorDistribution {
+  byCategory: { category: string; count: number }[];
+  byPlatform: { platform: string; count: number }[];
+  detailed: { platform: string; model_id: string; error_category: string; count: number }[];
 }
 
 // ---- Rate Limit Types ----
