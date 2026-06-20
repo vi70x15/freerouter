@@ -1,111 +1,180 @@
-# Per-Model Breakdown: Show Only Enabled Models — Design
+# Analytics Fallback-Config Consistency — Design
 
-## Architecture Decision: Add LEFT JOIN + NULL-safe WHERE Clause
+## Architecture Decision: Add LEFT JOIN models + LEFT JOIN fallback_config to All 6 Endpoints
 
-The current `/by-model` query has **no JOIN to the `models` table** — it only queries `requests r`. To filter by `models.enabled`, we must add a `LEFT JOIN models m` (needed to get the `enabled` column) and then a NULL-safe WHERE condition.
+The `/by-model` endpoint already has the correct JOINs and filters (from commit `3db0c29`):
 
-### Why LEFT JOIN, not INNER JOIN?
+```sql
+LEFT JOIN models m ON m.platform = r.platform AND m.model_id = r.model_id
+LEFT JOIN fallback_config fc ON fc.model_db_id = m.id
+WHERE ...
+  AND (m.enabled IS NULL OR m.enabled = 1)
+  AND (fc.enabled IS NULL OR fc.enabled = 1)
+```
 
-Using `INNER JOIN models m … AND m.enabled = 1` would:
-1. **Exclude untracked models** (no `models` row → no JOIN match → row dropped). FR-6 requires untracked models stay visible.
-2. Lose the ability to detect `m.enabled IS NULL` vs `m.enabled = 0`.
+The same pattern must be applied to the other 5 endpoints. Every endpoint must count only requests whose model is **routable** (enabled in both `models` and `fallback_config`), with NULL-safe conditions preserving untracked models.
 
-A `LEFT JOIN` preserves all request rows and lets us filter with a NULL-safe condition.
+## NULL-safe filtering logic
 
-### Chosen condition
+For each endpoint, after the existing platform filter (`${pf.sql}`), add:
 
 ```sql
 AND (m.enabled IS NULL OR m.enabled = 1)
+AND (fc.enabled IS NULL OR fc.enabled = 1)
 ```
 
-| `m.enabled` value | Meaning | Included? |
-|---|---|---|
-| `1` | Model enabled | ✅ Yes |
-| `0` | Model disabled | ❌ No |
-| `NULL` | No models row (untracked) | ✅ Yes (FR-6) |
+This handles all cases:
+
+| `m.enabled` | `fc.enabled` | Meaning | Included? |
+|---|---|---|---|
+| 1 | 1 | Model enabled + in fallback chain | ✅ Yes |
+| 1 | 0 | Model enabled but disabled in fallback | ❌ No |
+| 0 | any | Model disabled | ❌ No |
+| NULL | NULL | No models row (untracked) | ✅ Yes (FR-7) |
 
 ---
 
-## Current SQL
+## Helper: `buildModelEnabledFilter()`
 
-```sql
-SELECT
-  r.platform,
-  r.model_id,
-  COUNT(*) as requests,
-  SUM(CASE WHEN r.status = 'success' THEN 1 ELSE 0 END) * 100.0 / COUNT(*) as success_rate,
-  AVG(r.latency_ms) as avg_latency_ms,
-  SUM(r.input_tokens) as total_input_tokens,
-  SUM(r.output_tokens) as total_output_tokens,
-  SUM(CASE WHEN r.requested_model = r.model_id THEN 1 ELSE 0 END) as pinned_requests
-FROM requests r
-WHERE r.created_at >= ?
-  ${pf.sql}
-GROUP BY r.platform, r.model_id
-ORDER BY requests DESC
-```
-
-## New SQL
-
-```sql
-SELECT
-  r.platform,
-  r.model_id,
-  m.display_name,
-  COUNT(*) as requests,
-  SUM(CASE WHEN r.status = 'success' THEN 1 ELSE 0 END) * 100.0 / COUNT(*) as success_rate,
-  AVG(r.latency_ms) as avg_latency_ms,
-  SUM(r.input_tokens) as total_input_tokens,
-  SUM(r.output_tokens) as total_output_tokens,
-  SUM(CASE WHEN r.requested_model = r.model_id THEN 1 ELSE 0 END) as pinned_requests
-FROM requests r
-LEFT JOIN models m ON m.platform = r.platform AND m.model_id = r.model_id
-WHERE r.created_at >= ?
-  ${pf.sql}
-  AND (m.enabled IS NULL OR m.enabled = 1)
-GROUP BY r.platform, r.model_id
-ORDER BY requests DESC
-```
-
-Changes:
-1. Added `LEFT JOIN models m ON m.platform = r.platform AND m.model_id = r.model_id`
-2. Added `m.display_name` to SELECT (uses the model's display name if available, falls back to `model_id` in the mapper)
-3. Added `AND (m.enabled IS NULL OR m.enabled = 1)` to WHERE
-
-The response mapper now uses `m.display_name ?? r.model_id` for `displayName`:
+A small helper that returns the JOIN + WHERE fragment, to avoid copy-pasting 3 lines into every endpoint:
 
 ```ts
-res.json(rows.map(r => ({
-  platform: r.platform,
-  modelId: r.model_id,
-  displayName: r.display_name ?? r.model_id,
-  requests: r.requests,
-  successRate: Math.round(r.success_rate * 10) / 10,
-  avgLatencyMs: Math.round(r.avg_latency_ms),
-  totalInputTokens: r.total_input_tokens ?? 0,
-  totalOutputTokens: r.total_output_tokens ?? 0,
-  pinnedRequests: r.pinned_requests ?? 0,
-})));
+/**
+ * Returns the SQL fragments for the models + fallback_config enabled filter.
+ * - joinSql: LEFT JOIN clauses to append after FROM requests r
+ * - whereSql: AND conditions to append after ${pf.sql}
+ * Both fragments are pure SQL with no bind params (the JOINs use m.id, no new params needed).
+ */
+function buildModelEnabledFilter(): { joinSql: string; whereSql: string } {
+  return {
+    joinSql: `LEFT JOIN models m ON m.platform = r.platform AND m.model_id = r.model_id
+      LEFT JOIN fallback_config fc ON fc.model_db_id = m.id`,
+    whereSql: `AND (m.enabled IS NULL OR m.enabled = 1)
+      AND (fc.enabled IS NULL OR fc.enabled = 1)`,
+  };
+}
 ```
 
-## Bonus: Display Name
+Since both JOINs are on indexed columns (`models` has a UNIQUE on `(platform, model_id)`, `fallback_config` has a UNIQUE on `model_db_id`), the join is fast and adds no bind params.
 
-The `LEFT JOIN` also brings in `m.display_name` for free. If a model has a custom display name set in the `models` table, the per-model breakdown will now show it instead of the raw `model_id`. This is a non-breaking enhancement — when `display_name` is NULL, the mapper falls back to `model_id` (same as before).
+---
+
+## Endpoint-by-Endpoint Changes
+
+### 1. `GET /api/analytics/summary`
+
+**Current SQL** (simplified):
+```sql
+SELECT
+  COUNT(*) as total_requests,
+  SUM(CASE WHEN r.status = 'success' THEN 1 ELSE 0 END) as success_count,
+  SUM(r.input_tokens) as total_input_tokens,
+  SUM(r.output_tokens) as total_output_tokens,
+  AVG(r.latency_ms) as avg_latency_ms,
+  SUM(CASE WHEN r.requested_model IS NOT NULL THEN 1 ELSE 0 END) as pinned_count,
+  SUM(CASE WHEN r.requested_model = r.model_id THEN 1 ELSE 0 END) as pin_honored_count
+FROM requests r
+WHERE r.created_at >= ?
+  ${pf.sql}
+```
+
+**New SQL**:
+```sql
+SELECT
+  COUNT(*) as total_requests,
+  SUM(CASE WHEN r.status = 'success' THEN 1 ELSE 0 END) as success_count,
+  SUM(r.input_tokens) as total_input_tokens,
+  SUM(r.output_tokens) as total_output_tokens,
+  AVG(r.latency_ms) as avg_latency_ms,
+  SUM(CASE WHEN r.requested_model IS NOT NULL THEN 1 ELSE 0 END) as pinned_count,
+  SUM(CASE WHEN r.requested_model = r.model_id THEN 1 ELSE 0 END) as pin_honored_count
+FROM requests r
+${mf.joinSql}
+WHERE r.created_at >= ?
+  ${pf.sql}
+  ${mf.whereSql}
+```
+
+Bind params unchanged — the model filter has no bind params.
+
+### 2. `GET /api/analytics/by-model`
+
+**Already fixed** in commit `3db0c29`. Refactor to use `buildModelEnabledFilter()` for consistency but no functional change.
+
+### 3. `GET /api/analytics/by-platform`
+
+**Current SQL** uses unaliased `requests` table (no `r.` alias). Must add `r` alias or use different join condition.
+
+**Important:** The `by-platform` query currently doesn't use the `r.` alias — it selects `platform` directly. To add JOINs we need to alias `requests AS r`:
+
+```sql
+SELECT
+  r.platform,
+  COUNT(*) as requests,
+  SUM(CASE WHEN r.status = 'success' THEN 1 ELSE 0 END) * 100.0 / COUNT(*) as success_rate,
+  AVG(r.latency_ms) as avg_latency_ms,
+  SUM(r.input_tokens) as total_input_tokens,
+  SUM(r.output_tokens) as total_output_tokens
+FROM requests r
+${mf.joinSql}
+WHERE r.created_at >= ?
+  ${pf.sql}
+  ${mf.whereSql}
+GROUP BY r.platform
+ORDER BY requests DESC
+```
+
+All column references must use `r.` prefix. Also change `buildPlatformFilter(active)` to `buildPlatformFilter(active, 'r')`.
+
+### 4. `GET /api/analytics/timeline`
+
+Same pattern: add `r` alias, `${mf.joinSql}`, `${mf.whereSql}`.
+
+```sql
+SELECT
+  strftime('${dateFormat}', r.created_at) as timestamp,
+  COUNT(*) as requests,
+  SUM(CASE WHEN r.status = 'success' THEN 1 ELSE 0 END) as success_count,
+  SUM(CASE WHEN r.status = 'error' THEN 1 ELSE 0 END) as failure_count
+FROM requests r
+${mf.joinSql}
+WHERE r.created_at >= ?
+  ${pf.sql}
+  ${mf.whereSql}
+GROUP BY strftime('${dateFormat}', r.created_at)
+ORDER BY timestamp ASC
+```
+
+Change `buildPlatformFilter(active)` to `buildPlatformFilter(active, 'r')`.
+
+### 5. `GET /api/analytics/error-distribution`
+
+All three internal queries need the same treatment. Add `r` alias, JOINs, WHERE filter, `r.` column prefixes.
+
+Change `buildPlatformFilter(active)` to `buildPlatformFilter(active, 'r')` for all three.
+
+### 6. `GET /api/analytics/errors`
+
+Add `r` alias, JOINs, WHERE filter, `r.` column prefixes.
+
+Change `buildPlatformFilter(active)` to `buildPlatformFilter(active, 'r')`.
+
+---
 
 ## Files Changed
 
 | File | Change |
 |---|---|
-| `server/src/routes/analytics.ts` | Add `LEFT JOIN models m`, `m.display_name` to SELECT, `AND (m.enabled IS NULL OR m.enabled = 1)` to WHERE, update mapper to use `display_name` |
-| `server/src/__tests__/routes/analytics.test.ts` | Add `describe('disabled model filtering in by-model')` test block with 4+ new tests |
+| `server/src/routes/analytics.ts` | Add `buildModelEnabledFilter()` helper. Update all 6 endpoints per above. |
+| `server/src/__tests__/routes/analytics.test.ts` | Add `insertFallbackConfig()` calls to all test setups missing them. Add cross-endpoint consistency tests. |
 
 No other files change. No client changes. No schema changes.
 
-## Interaction with Existing Specs
-
-- **`analytics-filter`**: The `active_platforms` + `buildPlatformFilter` logic remains unchanged. The model-level `enabled` check is applied **after** the platform filter as an additional WHERE condition. The two filters compose naturally with AND.
-- **`analytics-filter-disabled-models`**: This spec supersedes that earlier spec (same goals, updated to match the current codebase which no longer has the `LEFT JOIN models` in the query).
-
 ## Rollback
 
-Remove the `LEFT JOIN` line, the `m.display_name` column, the `AND (m.enabled …)` condition, and revert the mapper. A 4-line revert in one file. No migration, no client change to undo.
+Remove the helper, remove the JOIN/filter lines from each endpoint, revert to unaliased `requests` table in endpoints 3-6. Purely additive changes make rollback trivial.
+
+## Interaction with Existing Specs
+
+- **`analytics-filter`**: Platform-level filter unchanged. Model-level `fallback_config` filter is applied **after** the platform filter as additional WHERE conditions.
+- **`per-model-enabled-only` (commit `3db0c29`)**: The `/by-model` fix was correct. This spec extends the same fix to the other 5 endpoints.

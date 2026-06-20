@@ -1,112 +1,201 @@
-# Per-Model Breakdown: Show Only Enabled Models — Tasks
+# Analytics Fallback-Config Consistency — Tasks
 
-> **Branch:** `feat/per-model-enabled-only`
-> **Touch:** Only `server/src/routes/analytics.ts` + `server/src/__tests__/routes/analytics.test.ts`
-> **Do NOT touch:** client code, other server routes, DB migrations, other analytics endpoints
+> **Branch:** `fix/analytics-fallback-consistency`
+> **Touch:** `server/src/routes/analytics.ts` + `server/src/__tests__/routes/analytics.test.ts`
+> **Do NOT touch:** client code, other server routes, DB migrations
 
 ---
 
-## Task 1: Add LEFT JOIN + model-level enabled filter to `/by-model` SQL
+## Staging Bug
+
+After commit `3db0c29`, the `/by-model` endpoint filters by `fallback_config.enabled` but the other 5 endpoints don't. Result: summary shows 7076 total requests but by-model only sums to 5012. The 2064 missing requests belong to models disabled in the fallback tab.
+
+---
+
+## Task 1: Add `buildModelEnabledFilter()` helper
 
 **File:** `server/src/routes/analytics.ts`
 
-In the `/by-model` handler, modify the SQL query:
+Add after `buildPlatformFilter()` (around line 52):
 
-### 1a. Add LEFT JOIN
-
-After `FROM requests r`, add:
-
-```sql
-LEFT JOIN models m ON m.platform = r.platform AND m.model_id = r.model_id
+```ts
+/**
+ * Returns the SQL fragments for the models + fallback_config enabled filter.
+ * Appends LEFT JOINs to requests r and AND conditions to the WHERE clause.
+ * No bind params — the JOINs link via m.id, not user input.
+ */
+function buildModelEnabledFilter() {
+  return {
+    joinSql: `LEFT JOIN models m ON m.platform = r.platform AND m.model_id = r.model_id
+      LEFT JOIN fallback_config fc ON fc.model_db_id = m.id`,
+    whereSql: `AND (m.enabled IS NULL OR m.enabled = 1)
+      AND (fc.enabled IS NULL OR fc.enabled = 1)`,
+  };
+}
 ```
 
-### 1b. Add display_name to SELECT
-
-Add `m.display_name` as the third column in the SELECT list (after `r.model_id`).
-
-### 1c. Add NULL-safe enabled filter to WHERE
-
-After `${pf.sql}` and before `GROUP BY`, add:
-
-```sql
-AND (m.enabled IS NULL OR m.enabled = 1)
-```
-
-The full WHERE clause becomes:
-
-```sql
-WHERE r.created_at >= ?
-  ${pf.sql}
-  AND (m.enabled IS NULL OR m.enabled = 1)
-GROUP BY r.platform, r.model_id
-```
-
-### 1d. Update the response mapper
-
-Change `displayName: r.model_id` to `displayName: r.display_name ?? r.model_id` to use the model's display name when available.
-
-**Verification:** TypeScript compiles. The `/by-model` endpoint returns data for enabled and untracked models only; disabled models are absent.
+**Verification:** TypeScript compiles. Helper is not yet called.
 
 ---
 
-## Task 2: Add `describe('disabled model filtering in by-model')` test block
+## Task 2: Update `GET /api/analytics/summary`
+
+Add model-enabled filter to the summary query:
+
+```ts
+const mf = buildModelEnabledFilter();
+```
+
+SQL changes:
+- Add `${mf.joinSql}` after `FROM requests r`
+- Add `${mf.whereSql}` after `${pf.sql}`
+
+No bind param changes — the model filter has no params.
+
+**Verification:** Summary total should now match by-model sum.
+
+---
+
+## Task 3: Refactor `GET /api/analytics/by-model`
+
+Replace the inline `LEFT JOIN models` + `LEFT JOIN fallback_config` + `AND` conditions with the helper:
+
+```ts
+const mf = buildModelEnabledFilter();
+```
+
+Then use `${mf.joinSql}` and `${mf.whereSql}` in the SQL.
+
+Keep `m.display_name` in SELECT — it comes from the same `LEFT JOIN models m` that the helper provides. The function is identical; just uses the helper for DRY.
+
+---
+
+## Task 4: Update `GET /api/analytics/by-platform`
+
+This endpoint currently uses unaliased `requests` (no `r.`). Must refactor:
+
+1. Change `FROM requests` → `FROM requests r`
+2. Prefix all column references with `r.`: `r.platform`, `r.status`, `r.latency_ms`, `r.input_tokens`, `r.output_tokens`, `r.created_at`
+3. Change `buildPlatformFilter(active)` → `buildPlatformFilter(active, 'r')`
+4. Add `const mf = buildModelEnabledFilter();`
+5. Add `${mf.joinSql}` after `FROM requests r`
+6. Add `${mf.whereSql}` after `${pf.sql}`
+
+**Verification:** by-platform only counts traffic from fallback-enabled models.
+
+---
+
+## Task 5: Update `GET /api/analytics/timeline`
+
+Same pattern as Task 4:
+
+1. `FROM requests` → `FROM requests r`
+2. Prefix all columns with `r.`
+3. `buildPlatformFilter(active)` → `buildPlatformFilter(active, 'r')`
+4. Add `const mf = buildModelEnabledFilter();`
+5. Add `${mf.joinSql}` + `${mf.whereSql}`
+
+**Verification:** Timeline only counts fallback-enabled traffic.
+
+---
+
+## Task 6: Update `GET /api/analytics/error-distribution`
+
+All three internal queries need the same treatment:
+
+1. `FROM requests` → `FROM requests r`
+2. Prefix columns with `r.`
+3. `buildPlatformFilter(active)` → `buildPlatformFilter(active, 'r')` for all three
+4. Add `const mf = buildModelEnabledFilter();` before the queries
+5. Add `${mf.joinSql}` + `${mf.whereSql}` to each query
+
+**Verification:** Error distribution only counts fallback-enabled models' errors.
+
+---
+
+## Task 7: Update `GET /api/analytics/errors`
+
+Same pattern:
+
+1. `FROM requests` → `FROM requests r`
+2. Prefix columns with `r.`
+3. `buildPlatformFilter(active)` → `buildPlatformFilter(active, 'r')`
+4. Add `const mf = buildModelEnabledFilter();`
+5. Add `${mf.joinSql}` + `${mf.whereSql}`
+
+**Verification:** Recent errors only shows fallback-enabled models.
+
+---
+
+## Task 8: Update existing tests
 
 **File:** `server/src/__tests__/routes/analytics.test.ts`
 
-Add a new `describe` block inside the top-level `describe('Analytics API', ...)`, after the existing `describe('active provider filtering', ...)` block.
+The test file already has `insertFallbackConfig()` helper (from commit `3db0c29`).
 
-### Test cases (4 minimum):
+### 8a. Ensure all test models have fallback_config rows
 
-| # | Test name | Setup | Assertion |
-|---|---|---|---|
-| 1 | `excludes disabled model from by-model breakdown` | `insertKey('dm', 1)`, `insertModel('dm', 'active-m', 1)`, `insertModel('dm', 'disabled-m', 0)`. Insert requests for both models. | `byModel` response has 1 row for `active-m` only; `disabled-m` absent |
-| 2 | `includes untracked model (no models row) in by-model breakdown` | `insertKey('untracked', 1)`, `insertModel('untracked', 'known-m', 1)`. Insert requests for `known-m` and for `ghost-m` (no `insertModel` call). | Response has 2 rows: `known-m` and `ghost-m` |
-| 3 | `re-enabled model appears in by-model breakdown` | `insertKey('retoggle', 1)`, `insertModel('retoggle', 'm1', 0)`. Insert request. Fetch → verify absent. Then `UPDATE models SET enabled = 1 WHERE ...`. Fetch again → verify present with its historical data |
-| 4 | `disabled model on active platform does not affect by-platform` | Same setup as test 1. Fetch `/by-platform`. | `byPlatform` still counts ALL requests for the active platform (including disabled-model requests), because by-platform is platform-level, not model-level |
+The parent `beforeEach` already seeds fallback rows for `test`, `groq`, `custom` platforms and clears `fallback_config`. Verify all existing tests still pass after the 6-endpoint change.
 
-### Test helper
+### 8b. Add fallback-disabled models to the `active provider filtering` describe block
 
-The existing `insertModel(platform, modelId, enabled)` helper already supports the `enabled` parameter. No new helpers needed.
+Some tests in the `active provider filtering` block insert models without fallback rows. Since `fc.enabled IS NULL` passes the filter (untracked models are included), this should still work — but adding explicit `insertFallbackConfig` calls makes the tests more realistic and catches edge cases.
 
-**Verification:** `npm run test -w server -- --run server/src/__tests__/routes/analytics.test.ts` — all pass.
+For each `insertModel` in the active-provider-filtering tests, add a corresponding `insertFallbackConfig(platform, modelId, 1)`.
+
+### 8c. Add cross-endpoint consistency test
+
+Add a new test in the `disabled model filtering in by-model` block:
+
+```
+'by-model request counts match summary total'
+```
+
+Setup:
+- `insertKey('cons', 1)`
+- `insertModel('cons', 'fc-on', 1)` + `insertFallbackConfig('cons', 'fc-on', 1)`
+- `insertModel('cons', 'fc-off', 1)` + `insertFallbackConfig('cons', 'fc-off', 0)`
+- Insert 10 requests for `fc-on`, 5 requests for `fc-off`
+
+Assert:
+- `byModel` has 1 row (fc-on with 10 requests)
+- `summary.totalRequests === 10` (not 15)
+- `byPlatform` has 1 row for `cons` with 10 requests
 
 ---
 
-## Task 3: Broader test run & regression check
+## Task 9: Broader regression check
 
 ```bash
 npm run test -w server -- --run
 ```
 
-Watch for failures in:
-- `server/src/__tests__/routes/analytics.test.ts` — primary
-- `server/src/__tests__/integration/full-flow.test.ts` — step 6 checks analytics
-
-If integration tests break, diagnose whether they insert requests for disabled models and fix the test setup (not the code).
+All 663+ tests must pass. Watch for failures in:
+- `analytics.test.ts` — primary
+- `full-flow.test.ts` — integration
 
 ---
 
-## Task 4: Final smoke test
+## Task 10: Smoke test against real DB
 
 ```bash
 npm run dev
 ```
 
-1. Open the Analytics tab → Per-model breakdown shows only enabled models.
-2. Disable a model in the Keys/Models tab.
-3. Return to Analytics → the disabled model no longer appears in the table.
-4. Re-enable the model → it reappears with its historical data.
+1. Open the Analytics tab → summary total should match by-model sum.
+2. Verify that by-platform, timeline, and error-distribution counts are also reduced (they no longer include fallback-disabled model traffic).
+3. The numbers across all panels should be consistent.
 
 ---
 
 ## Acceptance Checklist
 
-- [ ] `/by-model` endpoint excludes rows where `m.enabled = 0`
-- [ ] `/by-model` endpoint still includes models with no `models` row (`m.enabled IS NULL`)
-- [ ] `/by-model` returns `display_name` when available, falls back to `model_id`
-- [ ] Other 5 analytics endpoints are **unmodified**
+- [ ] All 6 analytics endpoints filter by `fallback_config.enabled`
+- [ ] Summary total matches by-model request sum (within untracked-model tolerance)
+- [ ] By-platform counts consistent with by-model
+- [ ] `buildModelEnabledFilter()` helper used consistently
+- [ ] Existing 19 analytics tests pass
+- [ ] New cross-endpoint consistency test passes
+- [ ] Full server test suite passes
 - [ ] Client `AnalyticsPage.tsx` is **not modified**
 - [ ] No DB schema changes
-- [ ] No new dependencies
-- [ ] 4 new model-filtering tests pass
-- [ ] Full server test suite passes
